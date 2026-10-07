@@ -2,30 +2,26 @@ import { Client, APIGatewayBotInfo, WebhooksAPI } from '@discordjs/core';
 import { RequestInit } from 'undici';
 import { REST, DefaultRestOptions, ResponseLike } from '@discordjs/rest';
 import { WebSocketManager, WebSocketShard } from '@discordjs/ws';
-import { GatewaySendPayload, GatewayOpcodes } from 'discord-api-types/v10';
+import {
+	GatewaySendPayload,
+	GatewayOpcodes,
+	GatewayIntentBits,
+} from 'discord-api-types/v10';
 import { QuestManager } from './questManager';
 import { AllQuestsResponse } from './interface';
 import { Constants } from './constants';
 import { Utils } from './utils';
 
-/**
- * Standard "user account" gateway intents.
- * Bitfield:
- *   GUILDS                    = 1
- *   GUILD_MEMBERS             = 2
- *   GUILD_PRESENCES           = 256
- *   GUILD_MESSAGES            = 512
- *   GUILD_MESSAGE_REACTIONS   = 1024
- *   DIRECT_MESSAGES           = 4096
- *   DIRECT_MESSAGE_REACTIONS  = 8192
- *   GUILD_VOICE_STATES        = 128
- * ------------------------------------------------
- *   Total = 105512949
- *
- * Sending `intents: 0` (or anything outside this set) causes
- * Discord to close the connection with `Used invalid intents`.
- */
-const USER_INTENTS = 105512949;
+/** User-account intents = 105512949 */
+const USER_INTENTS =
+	GatewayIntentBits.Guilds |
+	GatewayIntentBits.GuildMembers |
+	GatewayIntentBits.GuildPresences |
+	GatewayIntentBits.GuildMessages |
+	GatewayIntentBits.GuildMessageReactions |
+	GatewayIntentBits.DirectMessages |
+	GatewayIntentBits.DirectMessageReactions |
+	GatewayIntentBits.GuildVoiceStates;
 
 async function makeRequest(
 	url: string,
@@ -37,25 +33,35 @@ async function makeRequest(
 	return DefaultRestOptions.makeRequest(url, init);
 }
 
-const originalSend = WebSocketShard.prototype.send;
-WebSocketShard.prototype.send = async function (payload: GatewaySendPayload) {
+/**
+ * Patch the shard's Identify payload at construction time, so the *first*
+ * handshake is a valid user-client Identify. Without this, @discordjs/ws
+ * sends a bot-style Identify and Discord closes with `Used invalid intents`;
+ * the library then auto-reconnects (via resume) which is why it eventually
+ * logs in — but the first attempt always errors.
+ */
+const OriginalWebSocketShard = WebSocketShard as any;
+const originalShardSend = WebSocketShard.prototype.send;
+
+WebSocketShard.prototype.send = async function (
+	this: WebSocketShard,
+	payload: GatewaySendPayload,
+) {
 	if (payload.op === GatewayOpcodes.Identify) {
 		payload.d = {
-			token: payload.d.token,
+			...payload.d,
 			properties: {
 				...Constants.Properties,
 				is_fast_connect: false,
 				gateway_connect_reasons: 'AppSkeleton',
 			},
 			capabilities: 0,
-			presence: payload.d.presence,
-			compress: payload.d.compress,
 			client_state: {
 				guild_versions: {},
 			},
 		} as any;
 	}
-	return originalSend.call(this, payload);
+	return originalShardSend.call(this, payload);
 };
 
 export class ClientQuest extends Client {
@@ -82,15 +88,13 @@ export class ClientQuest extends Client {
 		});
 
 		const gateway = new WebSocketManager({
-			token: token,
-			intents: USER_INTENTS, // ← fixed: was 0
+			token,
+			intents: USER_INTENTS,
 			rest,
 			readyTimeout: 120_000,
 		});
 
-		gateway.fetchGatewayInformation = (
-			force?: boolean,
-		): Promise<APIGatewayBotInfo> => {
+		gateway.fetchGatewayInformation = (): Promise<APIGatewayBotInfo> => {
 			return Promise.resolve({
 				url: 'wss://gateway.discord.gg',
 				shards: 1,
@@ -155,9 +159,7 @@ export class ClientQuest extends Client {
 	sendWebhookMessage(content: string) {
 		if (this.#webhookId && this.#webhookToken) {
 			this.webhook
-				.execute(this.#webhookId, this.#webhookToken, {
-					content,
-				})
+				.execute(this.#webhookId, this.#webhookToken, { content })
 				.catch(() => {});
 		}
 	}
