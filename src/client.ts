@@ -22,11 +22,20 @@ async function makeRequest(
 }
 
 /**
- * For USER tokens: strip the `intents` field entirely from the Identify payload.
- * Discord rejects any user-token Identify that includes `intents` with 4013
- * (InvalidIntents). The field must be absent, not zero.
+ * Patch the shard's send() so the Identify payload matches what Discord
+ * expects from a real user (selfbot) client:
+ *
+ *   1. Replace `properties` with a full desktop-client fingerprint.
+ *   2. Set `capabilities` and `client_state` to desktop-client defaults.
+ *   3. DELETE the `intents` field entirely. User tokens must NOT send
+ *      `intents`; Discord closes the socket with 4013 (InvalidIntents)
+ *      if the field is present, even if the bitfield is "valid".
+ *
+ * Without step 3 the first Identify is rejected and @discordjs/ws
+ * auto-reconnects (via RESUME, which doesn't revalidate) — which is why
+ * the bot eventually logs in but always prints the error once.
  */
-const originalShardSend = WebSocketShard.prototype.send;
+const originalSend = WebSocketShard.prototype.send;
 WebSocketShard.prototype.send = async function (
 	this: WebSocketShard,
 	payload: GatewaySendPayload,
@@ -34,19 +43,20 @@ WebSocketShard.prototype.send = async function (
 	if (payload.op === GatewayOpcodes.Identify) {
 		const d = payload.d as any;
 
-		// Rewrite identify properties to mimic a real desktop client.
 		d.properties = {
 			...Constants.Properties,
 			is_fast_connect: false,
 			gateway_connect_reasons: 'AppSkeleton',
 		};
 		d.capabilities = 0;
-		d.client_state = { guild_versions: {} };
+		d.client_state = {
+			guild_versions: {},
+		};
 
-		// CRITICAL: delete the `intents` field for user tokens.
+		// ⬇️ THE FIX: remove `intents` for user-token Identify payloads.
 		delete d.intents;
 	}
-	return originalShardSend.call(this, payload);
+	return originalSend.call(this, payload);
 };
 
 export class ClientQuest extends Client {
@@ -74,8 +84,9 @@ export class ClientQuest extends Client {
 
 		const gateway = new WebSocketManager({
 			token,
-			// For user tokens, intents must not be sent. Set to 0 so the
-			// library doesn't try to include privileged intents by default.
+			// Keep 0 here so @discordjs/ws doesn't inject a default bitfield
+			// into the Identify payload. The send() patch above deletes the
+			// field anyway, but this keeps the initial object clean.
 			intents: 0,
 			rest,
 			readyTimeout: 120_000,
@@ -146,7 +157,9 @@ export class ClientQuest extends Client {
 	sendWebhookMessage(content: string) {
 		if (this.#webhookId && this.#webhookToken) {
 			this.webhook
-				.execute(this.#webhookId, this.#webhookToken, { content })
+				.execute(this.#webhookId, this.#webhookToken, {
+					content,
+				})
 				.catch(() => {});
 		}
 	}
