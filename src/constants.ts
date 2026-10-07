@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto';
 export class Constants extends null {
 	static readonly USER_AGENT =
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9236 Chrome/138.0.7204.251 Electron/37.6.0 Safari/537.36';
-	static readonly Properties = {
+
+	/**
+	 * Runtime-populated after `Utils.updateLatestBuildVersion()` runs.
+	 * These are the canonical desktop-client identify properties.
+	 */
+	static Properties: Record<string, any> = {
 		os: 'Windows',
 		browser: 'Discord Client',
 		release_channel: 'stable',
@@ -17,14 +22,30 @@ export class Constants extends null {
 		browser_user_agent: Constants.USER_AGENT,
 		browser_version: '37.6.0',
 		os_sdk_version: '19045',
-		client_build_number: 539951,
+		client_build_number: 631730, // ← matches the build bot.ts fetches
 		native_build_number: 81687,
 		client_event_source: null,
 		launch_signature: randomUUID(),
 		client_heartbeat_session_id: randomUUID(),
 		client_app_state: 'focused',
 	};
-	// Android
+
+	/**
+	 * Called by Utils.updateLatestBuildVersion() after it fetches the
+	 * latest Discord build. Keeps client_version / client_build_number /
+	 * UA all in sync so the gateway accepts the first Identify.
+	 */
+	static updateBuild(buildNumber: number): void {
+		const version = `1.0.${buildNumber}`;
+		Constants.Properties.client_version = version;
+		Constants.Properties.client_build_number = buildNumber;
+		Constants.Properties.browser_user_agent =
+			`Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ` +
+			`(KHTML, like Gecko) discord/${version} Chrome/138.0.7204.251 ` +
+			`Electron/37.6.0 Safari/537.36`;
+	}
+
+	// Android (unchanged)
 	static readonly ANDROID_USER_AGENT = 'Discord-Android/316011;RNA';
 	static readonly ANDROID_Properties = {
 		os: 'Android',
@@ -42,7 +63,7 @@ export class Constants extends null {
 		client_build_number: 5169,
 		client_event_source: null,
 		client_launch_id: randomUUID(),
-		launch_signature: '1771754995045142953', // ?
+		launch_signature: '1771754995045142953',
 		client_app_state: 'active',
 		client_heartbeat_session_id: randomUUID(),
 	};
