@@ -30,10 +30,6 @@ async function makeRequest(
  *   3. DELETE the `intents` field entirely. User tokens must NOT send
  *      `intents`; Discord closes the socket with 4013 (InvalidIntents)
  *      if the field is present, even if the bitfield is "valid".
- *
- * Without step 3 the first Identify is rejected and @discordjs/ws
- * auto-reconnects (via RESUME, which doesn't revalidate) — which is why
- * the bot eventually logs in but always prints the error once.
  */
 const originalSend = WebSocketShard.prototype.send;
 WebSocketShard.prototype.send = async function (
@@ -84,9 +80,7 @@ export class ClientQuest extends Client {
 
 		const gateway = new WebSocketManager({
 			token,
-			// Keep 0 here so @discordjs/ws doesn't inject a default bitfield
-			// into the Identify payload. The send() patch above deletes the
-			// field anyway, but this keeps the initial object clean.
+			// Set to 0 here; the send() patch above deletes the field anyway.
 			intents: 0,
 			rest,
 			readyTimeout: 120_000,
