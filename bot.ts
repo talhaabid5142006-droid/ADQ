@@ -45,7 +45,7 @@ client.once(GatewayDispatchEvents.Ready, async ({ data, api }) => {
 		await client.questManager!.redeemQuest(quest);
 	}
 	*/
-	// Disconnect
+
 	console.log('All quests processed. Disconnecting...');
 	await client.destroy();
 });
