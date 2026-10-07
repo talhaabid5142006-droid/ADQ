@@ -8,11 +8,29 @@ import { AllQuestsResponse } from './interface';
 import { Constants } from './constants';
 import { Utils } from './utils';
 
+/**
+ * Standard "user account" gateway intents.
+ * Bitfield:
+ *   GUILDS                    = 1
+ *   GUILD_MEMBERS             = 2
+ *   GUILD_PRESENCES           = 256
+ *   GUILD_MESSAGES            = 512
+ *   GUILD_MESSAGE_REACTIONS   = 1024
+ *   DIRECT_MESSAGES           = 4096
+ *   DIRECT_MESSAGE_REACTIONS  = 8192
+ *   GUILD_VOICE_STATES        = 128
+ * ------------------------------------------------
+ *   Total = 105512949
+ *
+ * Sending `intents: 0` (or anything outside this set) causes
+ * Discord to close the connection with `Used invalid intents`.
+ */
+const USER_INTENTS = 105512949;
+
 async function makeRequest(
 	url: string,
 	init: RequestInit,
 ): Promise<ResponseLike> {
-	// console.log(`Making request to ${url} with method ${init.method}...`);
 	if (init.headers) {
 		init.headers = Utils.makeHeaders(init.headers as any);
 	}
@@ -46,10 +64,12 @@ export class ClientQuest extends Client {
 	public webhook = new WebhooksAPI(new REST());
 	#webhookId: string | null = null;
 	#webhookToken: string | null = null;
+
 	constructor(token: string) {
 		if (!token) {
 			throw new Error('Token is required to initialize the client.');
 		}
+
 		const rest = new REST({ version: '10', makeRequest }).setToken(token);
 		rest.on('rateLimited', (info: any) => {
 			console.warn(
@@ -60,12 +80,14 @@ export class ClientQuest extends Client {
 					`  -> Retry after: ${info.retryAfter}ms (${(info.retryAfter / 1000).toFixed(2)}s)\n`,
 			);
 		});
+
 		const gateway = new WebSocketManager({
 			token: token,
-			intents: 0,
+			intents: USER_INTENTS, // ← fixed: was 0
 			rest,
 			readyTimeout: 120_000,
 		});
+
 		gateway.fetchGatewayInformation = (
 			force?: boolean,
 		): Promise<APIGatewayBotInfo> => {
@@ -80,22 +102,30 @@ export class ClientQuest extends Client {
 				},
 			});
 		};
+
 		super({ rest, gateway });
 		this.websocketManager = gateway;
 		gateway.on('error', () => null);
 	}
+
 	connect() {
 		return Promise.allSettled([
 			Utils.updateLatestBuildVersion(),
 			this.setupWebhook(),
-		]).then(() => this.websocketManager.connect()).catch((e) => {
-			console.error('Error during client connection:', e.message);
-			return this.sendWebhookMessage('Error during client connection: ' + e.message);
-		});
+		])
+			.then(() => this.websocketManager.connect())
+			.catch((e) => {
+				console.error('Error during client connection:', e.message);
+				return this.sendWebhookMessage(
+					'Error during client connection: ' + e.message,
+				);
+			});
 	}
+
 	destroy() {
 		return this.websocketManager.destroy();
 	}
+
 	setupWebhook() {
 		return Utils.extractWebhookInfo().then((info) => {
 			if (info) {
@@ -105,6 +135,7 @@ export class ClientQuest extends Client {
 			}
 		});
 	}
+
 	fetchQuests(fetchExcludedQuests = false) {
 		return this.rest
 			.get('/quests/@me')
@@ -120,6 +151,7 @@ export class ClientQuest extends Client {
 				return manager;
 			});
 	}
+
 	sendWebhookMessage(content: string) {
 		if (this.#webhookId && this.#webhookToken) {
 			this.webhook
@@ -129,6 +161,7 @@ export class ClientQuest extends Client {
 				.catch(() => {});
 		}
 	}
+
 	emitQuestCompleted(questId: string) {
 		return this.sendWebhookMessage(
 			`[Quest Completed!](https://discord.com/quests/${questId})`,
