@@ -1,51 +1,159 @@
-import { GatewayDispatchEvents } from 'discord-api-types/v10';
-import { ClientQuest } from './src/client';
-import { Utils } from './src/utils';
-import { Constants } from './src/constants';
+import { Client, APIGatewayBotInfo, WebhooksAPI } from '@discordjs/core';
+import { RequestInit } from 'undici';
+import { REST, DefaultRestOptions, ResponseLike } from '@discordjs/rest';
+import { WebSocketManager, WebSocketShard } from '@discordjs/ws';
+import {
+	GatewaySendPayload,
+	GatewayOpcodes,
+} from 'discord-api-types/v10';
+import { QuestManager } from './questManager';
+import { AllQuestsResponse } from './interface';
+import { Constants } from './constants';
+import { Utils } from './utils';
 
-let currentUserId: string | null = null;
-
-async function main() {
-	// 1. Fetch the latest build FIRST, so Constants.Properties is accurate
-	//    before the WebSocket shard's Identify payload is created.
-	const build = await Utils.updateLatestBuildVersion();
-	Constants.updateBuild(build);
-	console.log(`Build number: ${build}`);
-
-	// 2. Now safe to construct the client with synced properties.
-	const client = new ClientQuest(process.env.TOKEN!);
-
-	client.once(GatewayDispatchEvents.Ready, async ({ data }) => {
-		currentUserId = data.user.id;
-		if (process.env.GITHUB_ACTIONS === 'true') {
-			console.log('Logged in!');
-		} else {
-			console.log(`Logged in as @${data.user.username}`);
-		}
-
-		await client.fetchQuests(false);
-		const questsValid = client.questManager!.filterQuestsValidToDo();
-		console.log(`Found ${questsValid.length} valid quests to do.`);
-		await Promise.allSettled(
-			questsValid.map((quest) => client.questManager!.doingQuest(quest)),
-		);
-
-		console.log('All quests processed. Disconnecting...');
-		await client.destroy();
-	});
-
-	await client.connect();
+async function makeRequest(
+	url: string,
+	init: RequestInit,
+): Promise<ResponseLike> {
+	if (init.headers) {
+		init.headers = Utils.makeHeaders(init.headers as any);
+	}
+	return DefaultRestOptions.makeRequest(url, init);
 }
 
-process.on('unhandledRejection', () => {
-	console.error('[Error:] Unhandled Rejection');
-});
+/**
+ * For USER tokens: strip the `intents` field entirely from the Identify payload.
+ * Discord rejects any user-token Identify that includes `intents` with 4013
+ * (InvalidIntents). The field must be absent, not zero.
+ */
+const originalShardSend = WebSocketShard.prototype.send;
+WebSocketShard.prototype.send = async function (
+	this: WebSocketShard,
+	payload: GatewaySendPayload,
+) {
+	if (payload.op === GatewayOpcodes.Identify) {
+		const d = payload.d as any;
 
-process.on('uncaughtException', (error) => {
-	console.error('Uncaught Exception:', error.message);
-});
+		// Rewrite identify properties to mimic a real desktop client.
+		d.properties = {
+			...Constants.Properties,
+			is_fast_connect: false,
+			gateway_connect_reasons: 'AppSkeleton',
+		};
+		d.capabilities = 0;
+		d.client_state = { guild_versions: {} };
 
-main().catch((e) => {
-	console.error('Fatal:', e);
-	process.exit(1);
-});
+		// CRITICAL: delete the `intents` field for user tokens.
+		delete d.intents;
+	}
+	return originalShardSend.call(this, payload);
+};
+
+export class ClientQuest extends Client {
+	public questManager: QuestManager | null = null;
+	public websocketManager: WebSocketManager;
+	public webhook = new WebhooksAPI(new REST());
+	#webhookId: string | null = null;
+	#webhookToken: string | null = null;
+
+	constructor(token: string) {
+		if (!token) {
+			throw new Error('Token is required to initialize the client.');
+		}
+
+		const rest = new REST({ version: '10', makeRequest }).setToken(token);
+		rest.on('rateLimited', (info: any) => {
+			console.warn(
+				`\n[RateLimit]\n` +
+					`  -> Route: ${info.method} ${info.route}\n` +
+					`  -> Scope: ${info.scope}${info.global ? ' (Global)' : ''}\n` +
+					`  -> Limit: ${info.limit} requests\n` +
+					`  -> Retry after: ${info.retryAfter}ms (${(info.retryAfter / 1000).toFixed(2)}s)\n`,
+			);
+		});
+
+		const gateway = new WebSocketManager({
+			token,
+			// For user tokens, intents must not be sent. Set to 0 so the
+			// library doesn't try to include privileged intents by default.
+			intents: 0,
+			rest,
+			readyTimeout: 120_000,
+		});
+
+		gateway.fetchGatewayInformation = (): Promise<APIGatewayBotInfo> => {
+			return Promise.resolve({
+				url: 'wss://gateway.discord.gg',
+				shards: 1,
+				session_start_limit: {
+					total: 1000,
+					remaining: 1000,
+					reset_after: 14400000,
+					max_concurrency: 1,
+				},
+			});
+		};
+
+		super({ rest, gateway });
+		this.websocketManager = gateway;
+		gateway.on('error', () => null);
+	}
+
+	connect() {
+		return Promise.allSettled([
+			Utils.updateLatestBuildVersion(),
+			this.setupWebhook(),
+		])
+			.then(() => this.websocketManager.connect())
+			.catch((e) => {
+				console.error('Error during client connection:', e.message);
+				return this.sendWebhookMessage(
+					'Error during client connection: ' + e.message,
+				);
+			});
+	}
+
+	destroy() {
+		return this.websocketManager.destroy();
+	}
+
+	setupWebhook() {
+		return Utils.extractWebhookInfo().then((info) => {
+			if (info) {
+				this.#webhookId = info.id;
+				this.#webhookToken = info.token;
+				console.log('Webhook setup complete.');
+			}
+		});
+	}
+
+	fetchQuests(fetchExcludedQuests = false) {
+		return this.rest
+			.get('/quests/@me')
+			.then((response) =>
+				QuestManager.fromResponse(
+					this,
+					response as AllQuestsResponse,
+					fetchExcludedQuests,
+				),
+			)
+			.then((manager) => {
+				this.questManager = manager;
+				return manager;
+			});
+	}
+
+	sendWebhookMessage(content: string) {
+		if (this.#webhookId && this.#webhookToken) {
+			this.webhook
+				.execute(this.#webhookId, this.#webhookToken, { content })
+				.catch(() => {});
+		}
+	}
+
+	emitQuestCompleted(questId: string) {
+		return this.sendWebhookMessage(
+			`[Quest Completed!](https://discord.com/quests/${questId})`,
+		);
+	}
+}
